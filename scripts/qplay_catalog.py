@@ -176,6 +176,30 @@ def search_tmdb(kind: str, title: str) -> dict:
     return {"results": candidates}
 
 
+def title_details(kind: str, tmdb_id: int) -> dict:
+    if kind not in ("movie", "tv"):
+        raise RuntimeError("Title kind must be 'movie' or 'tv'.")
+    endpoint = f"movie/{tmdb_id}" if kind == "movie" else f"tv/{tmdb_id}"
+    data = tmdb_request(endpoint)
+    genres = []
+    for genre in data.get("genres", []):
+        genre_id = int(genre.get("id") or 0)
+        genre_name = str(genre.get("name") or "").strip()
+        if kind == "tv":
+            genre_name = {
+                10765: "科幻与奇幻",
+                10768: "战争与政治",
+            }.get(genre_id, genre_name)
+        if genre_id > 0 and genre_name:
+            genres.append({"id": genre_id, "name": genre_name})
+    return {
+        "work_type": kind,
+        "tmdb_id": int(data.get("id") or tmdb_id),
+        "title": data.get("title") or data.get("name") or "",
+        "genres": genres,
+    }
+
+
 def episode_details(series_id: int, season: int, episode: int) -> dict:
     return tmdb_request(f"tv/{series_id}/season/{season}/episode/{episode}")
 
@@ -299,6 +323,17 @@ def open_database() -> sqlite3.Connection:
         last_opened_ms INTEGER NOT NULL DEFAULT 0,
         created_ms INTEGER NOT NULL DEFAULT 0
     )""")
+    connection.execute("""CREATE TABLE IF NOT EXISTS work_genres (
+        work_type TEXT NOT NULL CHECK (work_type IN ('movie', 'tv')),
+        tmdb_id INTEGER NOT NULL CHECK (tmdb_id > 0),
+        genre_id INTEGER NOT NULL CHECK (genre_id > 0),
+        genre_name TEXT NOT NULL,
+        PRIMARY KEY (work_type, tmdb_id, genre_id)
+    )""")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS work_genres_genre_idx "
+        "ON work_genres(genre_id, work_type, tmdb_id)"
+    )
     columns = {row[1] for row in connection.execute("PRAGMA table_info(media)")}
     migrations = {
         "tmdb_id": "INTEGER NOT NULL DEFAULT 0",
@@ -321,14 +356,50 @@ def open_database() -> sqlite3.Connection:
     return connection
 
 
-def import_metadata(path: Path) -> int:
+def import_metadata(path: Path) -> dict[str, int]:
     root, _, _, _, _ = read_config()
     try:
         records = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Cannot read metadata JSON: {error}") from None
-    if not isinstance(records, list):
-        raise RuntimeError("Metadata input must be a JSON array.")
+    if isinstance(records, list):
+        media_records = records
+        works = []
+    elif isinstance(records, dict):
+        media_records = records.get("media", [])
+        works = records.get("works", [])
+    else:
+        raise RuntimeError("Metadata input must be a JSON array or an object with media and works arrays.")
+    if not isinstance(media_records, list) or not isinstance(works, list):
+        raise RuntimeError("Metadata media and works values must be JSON arrays.")
+
+    normalized_works = []
+    seen_works = set()
+    for work in works:
+        if not isinstance(work, dict):
+            raise RuntimeError("Each work item must be a JSON object.")
+        work_type = str(work.get("work_type", ""))
+        tmdb_id = int(work.get("tmdb_id") or 0)
+        genres = work.get("genres", [])
+        if work_type not in ("movie", "tv") or tmdb_id <= 0 or not isinstance(genres, list):
+            raise RuntimeError("Each work requires work_type movie|tv, a positive tmdb_id, and a genres array.")
+        work_key = (work_type, tmdb_id)
+        if work_key in seen_works:
+            raise RuntimeError("Each TMDB work may appear only once in the works array.")
+        seen_works.add(work_key)
+        normalized_genres = []
+        seen_genres = set()
+        for genre in genres:
+            if not isinstance(genre, dict):
+                raise RuntimeError("Each genre must be a JSON object.")
+            genre_id = int(genre.get("id") or 0)
+            genre_name = str(genre.get("name") or "").strip()
+            if genre_id <= 0 or not genre_name:
+                raise RuntimeError("Each genre requires a positive id and a non-empty name.")
+            if genre_id not in seen_genres:
+                seen_genres.add(genre_id)
+                normalized_genres.append((genre_id, genre_name))
+        normalized_works.append((work_type, tmdb_id, normalized_genres))
 
     fields = (
         "source", "title", "tmdb_id", "poster_url", "backdrop_url", "rating",
@@ -339,7 +410,7 @@ def import_metadata(path: Path) -> int:
     try:
         connection.execute("BEGIN IMMEDIATE")
         now = int(time.time() * 1000)
-        for record in records:
+        for record in media_records:
             if not isinstance(record, dict):
                 raise RuntimeError("Each metadata item must be a JSON object.")
             source = str(record.get("source", ""))
@@ -371,13 +442,36 @@ def import_metadata(path: Path) -> int:
                 "still_url=excluded.still_url",
                 (*values, now),
             )
+        for work_type, tmdb_id, genres in normalized_works:
+            connection.execute(
+                "DELETE FROM work_genres WHERE work_type=? AND tmdb_id=?",
+                (work_type, tmdb_id),
+            )
+            connection.executemany(
+                "INSERT INTO work_genres(work_type,tmdb_id,genre_id,genre_name) VALUES(?,?,?,?)",
+                [(work_type, tmdb_id, genre_id, genre_name)
+                 for genre_id, genre_name in genres],
+            )
         connection.commit()
     except Exception:
         connection.rollback()
         raise
     finally:
         connection.close()
-    return len(records)
+    return {
+        "imported": len(media_records),
+        "works_updated": len(normalized_works),
+        "genres_written": sum(len(genres) for _, _, genres in normalized_works),
+    }
+
+
+def migrate_genres() -> dict[str, int | str]:
+    connection = open_database()
+    try:
+        count = connection.execute("SELECT COUNT(*) FROM work_genres").fetchone()[0]
+        return {"table": "work_genres", "genre_assignments": int(count)}
+    finally:
+        connection.close()
 
 
 def main() -> int:
@@ -388,6 +482,9 @@ def main() -> int:
     search = subparsers.add_parser("search", help="Search TMDB candidates")
     search.add_argument("kind", choices=("movie", "tv"))
     search.add_argument("title")
+    details = subparsers.add_parser("details", help="Get one TMDB movie or TV work with its genres")
+    details.add_argument("kind", choices=("movie", "tv"))
+    details.add_argument("tmdb_id", type=int)
     episode = subparsers.add_parser("episode", help="Get TMDB TV episode details")
     episode.add_argument("series_id", type=int)
     episode.add_argument("season", type=int)
@@ -401,7 +498,8 @@ def main() -> int:
     )
     episode_art.add_argument("series_id", type=int)
     subparsers.add_parser("check-tmdb", help="Verify TMDB credentials with a read-only API request")
-    importer = subparsers.add_parser("import", help="Upsert a metadata JSON array into qPlay SQLite")
+    subparsers.add_parser("migrate-genres", help="Create the work_genres table in the qPlay catalog")
+    importer = subparsers.add_parser("import", help="Upsert media metadata and work genres into qPlay SQLite")
     importer.add_argument("metadata", type=Path)
     args = parser.parse_args()
     try:
@@ -411,6 +509,8 @@ def main() -> int:
             result = list_media(args.limit)
         elif args.command == "search":
             result = search_tmdb(args.kind, args.title)
+        elif args.command == "details":
+            result = title_details(args.kind, args.tmdb_id)
         elif args.command == "episode":
             data = episode_details(args.series_id, args.season, args.episode)
             result = {key: data.get(key) for key in (
@@ -427,8 +527,10 @@ def main() -> int:
                 "authenticated": True,
                 "secure_image_base_url": images.get("secure_base_url", ""),
             }
+        elif args.command == "migrate-genres":
+            result = migrate_genres()
         else:
-            result = {"imported": import_metadata(args.metadata)}
+            result = import_metadata(args.metadata)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except (RuntimeError, sqlite3.Error, ET.ParseError, urllib.error.URLError) as error:

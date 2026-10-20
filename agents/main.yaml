@@ -1,17 +1,4 @@
 interface:
   display_name: "qPlay Media Scraper"
-  short_description: "Index AList WebDAV movies and TV episodes into qPlay"
-  default_prompt: "Scan my configured WebDAV library, match movies and episodes with TMDB, and update the qPlay catalog."
-  
-WEBDAV:
-  ip_adress: "127.0.0.1"
-  port: "5244"
-  library_folder: "/dav/Quark/TV"
-  user_name: "admin"
-  password: "orangepi"
-# full_request_url=http://127.0.0.1:5244/dav/Quark/TV/
-  
-TMDB:
-  api_key: "bb109558e7a73b66bd71743d3d88b191"
-  api_token: "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJiYjEwOTU1OGU3YTczYjY2YmQ3MTc0M2QzZDg4YjE5MSIsIm5iZiI6MTc0MDk5Nzk1NS42NTEsInN1YiI6IjY3YzU4NTQzODgxYzAxM2VkZTdhNzk3MyIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.c3EjDAzadXplrMvhov14rbUCJ3yWE6uHK9Aok6O-Cxc"
-  
+  short_description: "Index AList movies and TV episodes with TMDB metadata and genres"
+  default_prompt: "Scan the configured WebDAV library, match movies and TV episodes with TMDB, bind each matched movie or series to its TMDB genres, and write media rows and work genre links to the qPlay catalog."

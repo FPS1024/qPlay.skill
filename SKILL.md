@@ -27,14 +27,24 @@ database is `~/.local/share/qPlay/library.sqlite3`.
    helper; compare localized and original titles, years, season/episode
    numbers, and directory context. Do not assign a weak or ambiguous match.
    Leave unmatched rows without TMDB metadata and report them for later review.
-4. For TV episodes, use the TMDB episode response's title, localized overview,
+4. For every confidently matched movie or TV series, fetch its TMDB title
+   details once with `python3 scripts/qplay_catalog.py details movie|tv TMDB_ID`.
+   Include every returned genre `{id, name}` in the `works` array. Genres belong
+   to the work: use one `work_type: "movie"` record per movie TMDB ID and one
+   `work_type: "tv"` record per series TMDB ID, not one genre record per file
+   or episode. Do not invent genres for unmatched works. This binding is
+   required for every import so the catalog can support genre-based browsing
+   and recommendations later.
+5. For TV episodes, use the TMDB episode response's title, localized overview,
    and `still_path`; store a `still_url` using the TMDB `w300` image size, or an
-   empty value when TMDB has no still. Create a JSON metadata batch with one
-   item per video file and pass it to
-   `python3 scripts/qplay_catalog.py import <file>`. Import preserves qPlay's playback
+   empty value when TMDB has no still. Create a JSON metadata object with a
+   `media` array containing one item per video file and a `works` array
+   containing one item per matched movie or TV series. Pass it to
+   `python3 scripts/qplay_catalog.py import <file>`. Import stores media rows
+   and work genres in one transaction, and preserves qPlay's playback
    progress, favorites, and technical media fields. Use the credential-free
    WebDAV `source` value from the listing unchanged.
-5. Summarize imported, matched, unmatched, and ambiguous counts without
+6. Summarize imported, matched, unmatched, and ambiguous counts without
    revealing credentials. qPlay loads catalog changes on startup; restart it
    after importing to refresh the poster wall.
 
@@ -57,6 +67,13 @@ changing its episode numbers or other metadata, run
 To refresh episode titles, localized overviews, and still images for an
 already-imported series, run
 `python3 scripts/qplay_catalog.py sync-episode-details TMDB_SERIES_ID`.
+
+`python3 scripts/qplay_catalog.py migrate-genres` creates the `work_genres`
+table in an existing catalog. It does not scan WebDAV or contact TMDB. To
+refresh genre assignments for existing works, retrieve each distinct matched
+movie or series with the `details` command and import a `works` array. Include
+each work only once; an empty genre list intentionally clears that work's
+genre assignments.
 
 Do not scan or import the whole library unless the user requested a library
 refresh. Never alter or remove WebDAV files. If WebDAV access or TMDB lookup
